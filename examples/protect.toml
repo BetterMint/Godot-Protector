@@ -1,0 +1,44 @@
+
+
+[pack]
+input  = "mygame"
+output = "build/game.gdpk"
+
+chunk_size = 65536
+
+compress = true
+
+integrity_tree = true
+
+[obfuscate]
+enabled = true
+
+rename_identifiers = true
+
+encrypt_strings = true
+
+control_flow = true
+
+strip_comments = true
+
+preserve = [
+    "_ready",
+    "_process",
+    "_physics_process",
+    "_input",
+    "_enter_tree",
+    "_exit_tree",
+    "GameState",
+    "health_changed",
+    "max_health",
+]
+
+[virtualize]
+enabled = false
+
+scripts = [
+    "res://src/net/**",
+    "res://src/shop/**",
+]
+
+hardening = 1

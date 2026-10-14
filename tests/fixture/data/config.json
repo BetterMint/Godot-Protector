@@ -1,0 +1,9 @@
+{
+  "game": "FixtureGame",
+  "version": "0.1.0",
+  "player": {
+    "speed": 120.0,
+    "lives": 3
+  },
+  "levels": ["res://levels/one.tscn"]
+}

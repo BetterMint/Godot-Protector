@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "godot-protector"
+version = "0.1.0"
+description = "Pack, virtualize, and protect Godot games against decompilation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "BetterMint" }]
+keywords = ["godot", "gdscript", "drm", "obfuscation", "anti-tamper", "pck"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = ["cryptography>=41.0.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+gdprotect = "gdprotect.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gdprotect*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

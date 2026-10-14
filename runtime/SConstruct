@@ -1,0 +1,37 @@
+import os
+import sys
+
+env = SConscript(os.environ.get("GODOT_CPP_SCONSTRUCT",
+        "../godot-cpp/SConstruct"))
+
+env.Append(CPPPATH=["src", "shared"])
+
+key_hdr = os.path.join(Dir(".").srcnode().abspath, "key_shard.h")
+if os.path.exists(key_hdr):
+    with open(key_hdr) as f:
+        content = f.read()
+    if "AUTO-GENERATED" in content:
+        env.Append(CPPDEFINES=["GDPK_HAS_KEY_SHARD"])
+    else:
+        print("gdpk: key_shard.h is a PLACEHOLDER — building without key "
+              "material; run `gdprotect build --emit-key runtime/key_shard.h`")
+else:
+    print("gdpk: key_shard.h missing — building WITHOUT key material "
+          "(open_container will always fail)")
+
+sources = Glob("src/*.cpp")
+
+if env["platform"] == "macos":
+    library = env.SharedLibrary(
+        "addons/gdpk/bin/libgdpk{}.framework/libgdpk{}.{}".format(
+            env["suffix"], env["platform"], env["target"]),
+        source=sources,
+    )
+else:
+    library = env.SharedLibrary(
+        "addons/gdpk/bin/libgdpk{}{}".format(
+            env["suffix"], env["SHLIBSUFFIX"]),
+        source=sources,
+    )
+
+Default(library)
