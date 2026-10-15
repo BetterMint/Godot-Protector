@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for helping make `gdprotect` better. A few rules keep the codebase
-consistent and the docs honest.
+Glad you're here. This file is just the house rules — what's in them
+keeps the codebase consistent and the docs honest.
 
 ## Setup
 
@@ -12,27 +12,29 @@ pytest -q
 
 ## Code style
 
-- **Formatting:** black-ish — 88-col lines, double quotes, trailing commas.
-  Run `black gdprotect/` before pushing if you have it; the CI doesn't
-  enforce it, but don't reformat files you aren't touching.
-- **Type hints:** all public functions and dataclass fields are annotated.
-  Keep it that way — `from __future__ import annotations` is already at the
-  top of every module.
-- **Errors:** raise `ProtectionError` for user-facing failures (bad input,
-  unsupported construct, wrong key) — the CLI maps it to exit code 2 with a
-  clean message. Reserve `ValueError`/`TypeError` for programmer errors.
+- Formatting follows black loosely — 88 columns, double quotes, trailing
+  commas. If black is installed, run `black gdprotect/` before pushing;
+  CI doesn't enforce it. Don't reformat files you aren't already editing
+  though, it makes reviews miserable.
+- Type hints go on everything public: functions, dataclass fields. Every
+  module already has `from __future__ import annotations` up top, so
+  there's nothing extra to import.
+- `ProtectionError` is for user-facing failures (bad input, unsupported
+  construct, wrong key) — the CLI maps it to exit code 2 with a clean
+  message. `ValueError`/`TypeError` stay reserved for actual programmer
+  bugs.
 
 ## Tests
 
-Every PR needs `pytest` to pass. If you add a transform (obfuscation pass,
-VM opcode, codec), add a round-trip test — pack it, verify it, read it
-back. `tests/fixture/` holds the small Godot project used by CI; keep it
-tiny.
+PRs need `pytest` green. Adding a transform — an obfuscation pass, a VM
+opcode, a codec? A round-trip test goes in with it: pack a thing, verify
+it, read it back. The small Godot project in `tests/fixture/` is what CI
+runs against; keep it tiny.
 
 ## Format & spec changes
 
-The docs are normative — if you change the container, VM, or config format,
-update the matching spec in the same PR:
+The docs are the spec. If you change the container, VM, or config format,
+the matching doc update lands in the same PR:
 
 | You change… | You must also update… |
 |---|---|
@@ -43,16 +45,16 @@ update the matching spec in the same PR:
 | `runtime/shared/gdpk_format.h` | `docs/FORMAT.md` + `gdprotect/pck/container.py` (wire-format parity — see `runtime/README.md`) |
 | `gdprotect/pipeline.py` | `README.md` pipeline diagram + `docs/USAGE.md` workflows |
 
-A spec change without a doc update will be sent back — a third-party
-implementer reads only the docs.
+A spec change without the doc update gets sent back — third-party
+implementers only ever read the docs.
 
 ## Security issues
 
-Do **not** open public issues for vulnerabilities — a flaw in a protection
-tool is itself sensitive. Use a private GitHub security advisory. For
-everything else (bugs, features, docs), open a normal issue or PR.
+Don't open public issues for vulnerabilities. A flaw in a protection tool
+is sensitive by itself — use a private GitHub security advisory. Bugs,
+features, docs: a normal issue or PR is fine.
 
 ## License
 
-By contributing you agree your changes are licensed under the MIT license
-(see `LICENSE`).
+Send a PR and you're agreeing it ships under MIT like the rest of it
+(`LICENSE` has the full text).

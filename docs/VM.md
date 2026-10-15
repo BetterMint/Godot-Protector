@@ -1,41 +1,41 @@
 # GVM-1 — virtual instruction set and `.gvmb` module format
 
-GVM-1 is the register-machine ISA that selected GDScript sources are
-compiled into. A `.gvmb` image replaces a `.gd`/`.gdc` file inside the
-`.gdpk` container and is executed by the runtime interpreter
-(GDExtension or patched template — see `docs/USAGE.md`).
+GVM-1 is a register machine. Scripts picked for virtualization compile
+into it, and a `.gvmb` image takes the place of the `.gd`/`.gdc` file
+inside the `.gdpk` container. The runtime interpreter (GDExtension or
+patched template — `docs/USAGE.md` covers both) executes it.
 
-This document mirrors `gdprotect/vm/isa.py`. All integers are
-little-endian unless noted.
+This doc mirrors `gdprotect/vm/isa.py`. Integers are little-endian unless
+we say otherwise.
 
-**Why it protects.** The *encoded* opcode byte is not the semantic
-opcode — every build permutes the opcode space with a build-salt-keyed
-shuffle and encodes each cell's immediate field through a keyed Feistel
-network. Two builds of the same game share zero byte-level similarity,
-and a decompiler written against one build teaches you nothing about the
-next. There is no public GVM-1 decompiler; semantics exist only inside
-your shipped interpreter.
+**Why it protects.** The opcode byte on disk isn't the semantic opcode.
+Every build permutes the opcode space with a shuffle keyed by the build
+salt, and each cell's immediate goes through a keyed Feistel network.
+Two builds of the same game share zero byte-level similarity — a
+decompiler written against build A says nothing about build B. Nobody
+has published a GVM-1 decompiler; the semantics only exist inside your
+shipped interpreter.
 
 ---
 
 ## 1. Machine model
 
-- **Registers:** 16 general registers `r0..r15`. `r0` is the accumulator
-  by convention (call/arithmetic results land there).
-- **Operand stack:** value stack for argument marshalling (`PUSH`/`POP`)
-  and iterators.
-- **Constant pool:** per-module table of literals (`nil`, `bool`, `i64`,
-  `f64`, `str`, `bytes`) — also holds host-call names and member names
-  referenced by `CALL`/`CALLM`/`GETM`/`SETM`/`GETG`/`SETG`.
-- **Host-call table:** engine/builtin calls are not opcodes; `CALL`
-  resolves a const-pool name against the runtime's host API at load.
-  This keeps the ISA engine-version-independent.
-- **Globals:** module-level store addressed by name via `GETG`/`SETG`.
+- **Registers:** `r0..r15`, sixteen of them. `r0` is the accumulator by
+  convention — call and arithmetic results land there.
+- **Operand stack:** a value stack, used for argument marshalling
+  (`PUSH`/`POP`) and iterators.
+- **Constant pool:** per-module literal table (`nil`, `bool`, `i64`,
+  `f64`, `str`, `bytes`). It also holds the host-call names and member
+  names that `CALL`/`CALLM`/`GETM`/`SETM`/`GETG`/`SETG` reference.
+- **Host-call table:** engine and builtin calls aren't opcodes. `CALL`
+  resolves a const-pool name against the runtime's host API at load,
+  which is what keeps the ISA independent of engine versions.
+- **Globals:** a module-level store, addressed by name with `GETG`/`SETG`.
 
 ## 2. Opcodes (semantic order)
 
-The encoded byte for each opcode is a **per-build permutation** (§4) —
-the numbers below are semantic IDs, *never* what appears on disk.
+The encoded byte for each opcode is a **per-build permutation** (§4).
+The numbers below are semantic IDs — never what appears on disk.
 
 | ID | Mnemonic | Operands | Semantics |
 |---:|---|---|---|
@@ -137,20 +137,20 @@ per round r (0..3), with m = (R*0x9E37 + key + r*0x85EB) mod 2^32:
     (L, R) = (R, L ^ (F & 0xFFFF))
 ```
 
-Decoding runs the rounds in reverse, then re-signs from bit 31
+Decoding just runs the rounds in reverse and re-signs from bit 31
 (`u - 2^32` if `u & 0x80000000`).
 
 ### 4.3 Jump targets
 
-`J` operands are stored as `target ^ cell_key(cell_index)` — a lifted
-instruction's jump field is meaningless at any other position.
+`J` operands get stored as `target ^ cell_key(cell_index)`. Lift an
+instruction out and its jump field means nothing at any other position.
 
 ### 4.4 Result
 
-Same source → different salt → different opcode bytes, different
-immediate bytes, different jump encodings. Byte-level diffing across
-builds yields nothing; a static decoder must recover the salt *and*
-re-implement the position-keyed transforms.
+Same source, different salt: different opcode bytes, different immediate
+bytes, different jump encodings. Byte-level diffing between builds turns
+up nothing, and a static decoder has to recover the salt *and* redo all
+the position-keyed transforms before it reads a single instruction.
 
 ## 5. `.gvmb` module format
 
@@ -184,11 +184,10 @@ Then, in order:
 | `arg_count`  | `u16` | arity |
 | `name_kx`    | `u16` | const-pool index of the function name |
 
-**Code** — the encoded instruction stream, exactly `code byte span`
-bytes of variable-width cells (§3). Decoders walk `pos < byte span`,
-consuming however many bytes each opcode's layout needs — cell counts
-aren't meaningful at decode time because cells are packed, not
-fixed-width.
+**Code** — the encoded instruction stream: exactly `code byte span`
+bytes of variable-width cells (§3). Decoders walk `pos < byte span` and
+consume however many bytes the opcode's layout needs. Cell counts aren't
+a thing at decode time — cells are packed, not fixed-width.
 
 ## 6. In the container
 
@@ -200,12 +199,12 @@ fixed-width.
 ## 7. Coverage limits — the compiler's GDScript subset
 
 The GVM-1 compiler (`gdprotect/vm/compiler.py`) covers a **practical
-subset** of GDScript 2.x. Constructs outside the subset raise
-`VirtualizeUnsupported` (naming the construct and source location) and
-fail the build for that script — either rewrite the construct or exclude
-the file from `virtualize.scripts` and let it ship as obfuscated `.gd`
-source. The `virtualize.hardening` config knob (0–3) controls the density
-of opaque predicates injected into generated bytecode.
+subset** of GDScript 2.x — not the whole language. Anything outside it
+raises `VirtualizeUnsupported`, naming the construct and the source
+location, and fails the build for that script. Either rewrite the
+construct, or take the file out of `virtualize.scripts` and let it ship
+as obfuscated `.gd`. `virtualize.hardening` (0–3) sets how many opaque
+predicates get injected into the generated bytecode.
 
 ### Supported
 
@@ -234,6 +233,7 @@ of opaque predicates injected into generated bytecode.
 - `$Node` shorthand — write `get_node("…")` explicitly
 - `enum` beyond int-valued members; `yield` (Godot 3 spelling — use `await`)
 
-**Runtime requirement.** A stock export template cannot load `.gvmb`.
-You must ship the interpreter — see `docs/USAGE.md` §Runtime
-integration. Do not enable `virtualize` for builds that have no runtime.
+**Runtime requirement.** Stock export templates can't load `.gvmb` —
+you ship the interpreter or the files don't run. See `docs/USAGE.md`
+§Runtime integration. Don't enable `virtualize` for a build that has no
+runtime.
