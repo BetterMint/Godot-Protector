@@ -23,16 +23,14 @@ _LIB_PLATFORM = {
     ".wasm": "web",
 }
 
-
 def library_lines(ext_name: str, lib_names: list[str]) -> list[str]:
-    """Map each packed library filename to its .gdextension platform key."""
     lines = []
     for lib in sorted(lib_names):
         stem = Path(lib).name
         sfx = Path(lib).suffix.lower()
         plat = _LIB_PLATFORM.get(sfx, "windows")
         bits = stem.split(".")
-        # name.<platform>.<target>.<arch>.dll  — take middle tags when present
+
         tags = bits[1:-1] if len(bits) > 2 else []
         target = next((t for t in tags if "template" in t or t in
                        ("editor", "debug", "release")), "template_release")
@@ -43,13 +41,11 @@ def library_lines(ext_name: str, lib_names: list[str]) -> list[str]:
         lines.append(f'{key} = "res://bin/{stem}"')
     return lines
 
-
 def gdextension_text(ext_name: str, lib_names: list[str],
                      compat: str = "4.1") -> str:
     libs = "\n".join(library_lines(ext_name, lib_names))
     return _GDEXT_TMPL.format(entry="gdpx_init_entry", compat=compat,
                               libs=libs)
-
 
 REGISTER_TYPES_CPP = """\
 #include "register_types.h"
@@ -99,7 +95,6 @@ void gdpx_uninitialize(godot::ModuleInitializationLevel p_level);
 
 CLASSES_H = """\
 #pragma once
-// every transpiled class, in dependency order
 {includes}
 """
 
@@ -153,7 +148,6 @@ this automatically when the build succeeds). The `.gdextension` manifest
 next to `bin/` tells Godot which library to load per platform.
 """
 
-
 @dataclass
 class EmittedProject:
     dir: Path
@@ -161,7 +155,6 @@ class EmittedProject:
     gdextension_text: str
     sources: list[Path]
     lib_names: list[str]
-
 
 def emit_project(units: list[NativeUnit], out_dir: str | Path,
                  ext_name: str = "gdprotect_native",
@@ -171,36 +164,54 @@ def emit_project(units: list[NativeUnit], out_dir: str | Path,
     src_dir = out_dir / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
+
+    used_stems: set[str] = set()
+    for u in units:
+        stem, k = u.file_stem, 1
+        while u.file_stem in used_stems:
+            u.file_stem = f"{stem}_{k}"
+            k += 1
+        used_stems.add(u.file_stem)
+
     written = []
-    (src_dir / "gdpx_rt.h").write_text(GDPX_RT_H)
+    (src_dir / "gdpx_rt.h").write_text(GDPX_RT_H, encoding="utf-8")
     written.append(src_dir / "gdpx_rt.h")
-    (src_dir / "register_types.h").write_text(REGISTER_TYPES_H)
+    (src_dir / "register_types.h").write_text(REGISTER_TYPES_H,
+                                              encoding="utf-8")
     written.append(src_dir / "register_types.h")
 
     regs = []
     for u in units:
         h_path = src_dir / f"{u.file_stem}.h"
         c_path = src_dir / f"{u.file_stem}.cpp"
-        h_path.write_text(u.header)
-        c_path.write_text(u.source)
+        h_path.write_text(u.header, encoding="utf-8")
+        c_path.write_text(u.source, encoding="utf-8")
         written += [h_path, c_path]
         regs.append(u)
 
     includes = "\n".join(f'#include "{u.file_stem}.h"' for u in units)
     (src_dir / "classes.h").write_text(
-        CLASSES_H.replace("{includes}", includes))
+        CLASSES_H.replace("{includes}", includes), encoding="utf-8")
     written.append(src_dir / "classes.h")
 
     reg_names = [n for u in units for n in (u.all_names or [u.class_name])]
     reg_block = "\n".join(
         f'    godot::ClassDB::register_class<{n}>();' for n in reg_names)
+    internal = ["GxCo", "GxScriptRef"] + [
+        n for u in units for n in u.co_classes]
+    if internal:
+        reg_block += "\n" + "\n".join(
+            f'    godot::ClassDB::register_internal_class<{n}>();'
+            for n in dict.fromkeys(internal))
     (src_dir / "register_types.cpp").write_text(
-        REGISTER_TYPES_CPP.replace("{registrations}", reg_block))
+        REGISTER_TYPES_CPP.replace("{registrations}", reg_block),
+        encoding="utf-8")
     written.append(src_dir / "register_types.cpp")
 
     (out_dir / "SConstruct").write_text(
-        SCONSTRUCT.replace("{ext_name}", ext_name))
-    (out_dir / "BUILD.md").write_text(BUILD_MD.format(ext_name=ext_name))
+        SCONSTRUCT.replace("{ext_name}", ext_name), encoding="utf-8")
+    (out_dir / "BUILD.md").write_text(BUILD_MD.format(ext_name=ext_name),
+                                      encoding="utf-8")
 
     libs = lib_names or []
     gext = gdextension_text(ext_name, libs, compat=compat)

@@ -49,7 +49,7 @@ def run_build(cfg: Config, emit_key: str | Path | None = None,
         files = [(f.path, r.read_file(f)) for f in r.files]
 
     native_stats: dict = {"compiled": 0, "artifacts": []}
-    if cfg.native.enabled and cfg.native.scripts:
+    if cfg.native.enabled and (cfg.native.scripts or cfg.native.auto):
         files, native_stats = _native_stage(files, cfg, verbose)
 
     strpool_contents: dict[str, set[str]] = {}
@@ -137,49 +137,73 @@ def run_build(cfg: Config, emit_key: str | Path | None = None,
     })
     return stats
 
-
 def _native_stage(files, cfg: Config, verbose: bool):
-    """Transpile marked .gd scripts to C++ (GDExtension), remove them from
-    the pack, and add the extension manifest + libraries + rewritten
-    dependents."""
     from .native import (NativeError, transpile_source, emit_project,
                          rewrite_scene, rewrite_gd, build_extension,
                          find_toolchain)
 
-    targets = {p for p, _ in files if p.endswith(".gd")
-               and matches_any(p, cfg.native.scripts)}
+    data_map = dict(files)
+    all_gd = {p for p, _ in files if p.endswith(".gd")}
+    if cfg.native.auto:
+        targets = set(all_gd)
+    else:
+        targets = {p for p in all_gd
+                   if matches_any(p, cfg.native.scripts)}
+    targets -= {p for p in targets if matches_any(p, cfg.native.exclude)}
     if not targets:
         return files, {"compiled": 0, "artifacts": []}
 
-    # ---- pass 1: resolve class names so cross-references work ----
+
     from .native.ast import parse as native_parse
-    class_map: dict[str, str] = {}
-    bases: dict[str, str] = {}
-    parsed: dict[str, list] = {}
-    # every class_name in the pack -> its script path (native or not), so
-    # native code can reference non-native global classes via Script call
+
+
     script_classes: dict[str, str] = {}
     for path, data in files:
-        if not path.endswith(".gd") or path in targets:
+        if not path.endswith(".gd"):
             continue
         m = re.search(r"(?m)^[ \t]*class_name[ \t]+([A-Za-z_]\w*)",
                       data.decode("utf-8", "replace"))
         if m:
             script_classes[m.group(1)] = path
-    for path in sorted(targets):
-        data = dict(files)[path]
-        nodes = native_parse(data.decode("utf-8"), path)
+
+    autoloads = _read_autoloads(data_map)
+
+    class_map: dict[str, str] = {}
+    parsed: dict[str, list] = {}
+    dropped: dict[str, str] = {}
+    queue = sorted(targets)
+    while queue:
+        path = queue.pop(0)
+        if path in parsed:
+            continue
+        try:
+            nodes = native_parse(data_map[path].decode("utf-8"), path)
+        except Exception as e:
+            if cfg.native.on_error == "fallback":
+                targets.discard(path)
+                dropped[path] = f"parse error: {e}"
+                if verbose:
+                    print(f"  ! native fallback {path}: {e}")
+                continue
+            raise ProtectionError(f"native: {path}: {e}") from e
         parsed[path] = nodes
-        extends = next((n[3] for n in nodes
-                        if n[0] == "meta" and n[2] == "extends" and n[3]),
-                       None)
+        ext = next((n[3] for n in nodes
+                    if n[0] == "meta" and n[2] == "extends" and n[3]),
+                   None)
         cname = next((n[3] for n in nodes
                       if n[0] == "meta" and n[2] == "class_name" and n[3]),
                      None)
-        bases[path] = extends
         if cname:
             class_map[path] = cname.split(".")[-1]
-    # synthesize names for scripts without class_name
+        dep = _base_dep(ext, script_classes, path)
+        if dep and dep in all_gd and dep not in targets:
+
+
+            targets.add(dep)
+            queue.append(dep)
+            if verbose:
+                print(f"  + native {dep} (base class of {path})")
+
     for path in sorted(targets):
         if path not in class_map:
             stem = Path(path).stem
@@ -189,26 +213,44 @@ def _native_stage(files, cfg: Config, verbose: bool):
             while name in set(class_map.values()):
                 name += "X"
             class_map[path] = name
-    # native-to-native extends: base must be in the set or an engine class
-    for path, base in bases.items():
-        if base and base.startswith("res://") and base not in class_map:
-            raise ProtectionError(
-                f"native: {path} extends non-native {base} — add it to "
-                "native.scripts or drop it from the native set")
 
-    # ---- pass 2: transpile ----
-    units = []
-    for path in sorted(targets):
-        try:
-            unit = transpile_source(
-                dict(files)[path].decode("utf-8"), path, class_map,
-                script_classes)
-        except NativeError as e:
-            raise ProtectionError(f"native: {e}") from e
-        units.append(unit)
+
+    units: list = []
+    while True:
+        active = sorted(targets - set(dropped))
+        amap = {p: class_map[p] for p in active if p in class_map}
+        errs: dict[str, str] = {}
+        round_units: list = []
+        for path in active:
+            try:
+                unit = transpile_source(
+                    data_map[path].decode("utf-8"), path, amap,
+                    script_classes, autoloads)
+            except NativeError as e:
+                errs[path] = str(e)
+                continue
+            if unit.tool and cfg.native.skip_tool:
+                errs[path] = "@tool editor script stays interpreted"
+                continue
+            round_units.append(unit)
+        if not errs:
+            units = round_units
+            break
+        if cfg.native.on_error != "fallback":
+            first = sorted(errs)[0]
+            raise ProtectionError(f"native: {errs[first]}")
+        for p in errs:
+            class_map.pop(p, None)
+        dropped.update(errs)
         if verbose:
-            print(f"  + native {path} -> class {unit.class_name} "
+            for p, why in sorted(errs.items()):
+                print(f"  ! native fallback {p}: {why}")
+
+    for unit in units:
+        if verbose:
+            print(f"  + native {unit.res_path} -> class {unit.class_name} "
                   f"({unit.file_stem}.cpp)")
+    targets -= set(dropped)
 
     out_dir = Path(cfg.native.out_dir)
     artifacts: list[Path] = []
@@ -239,7 +281,7 @@ def _native_stage(files, cfg: Config, verbose: bool):
     lib_names = [a.name for a in artifacts]
     gtext = gdextension_text(cfg.native.ext_name, lib_names)
 
-    # ---- rewrite dependents & drop the sources ----
+
     out = []
     for res_path, data in files:
         if res_path in targets:
@@ -278,9 +320,34 @@ def _native_stage(files, cfg: Config, verbose: bool):
     return out, {"compiled": len(units),
                  "artifacts": [a.name for a in artifacts],
                  "classes": {u.res_path: u.class_name for u in units},
+                 "fallback": dropped or None,
                  "project": str(out_dir)}
 
+def _base_dep(ext, script_classes, from_path) -> str | None:
+    if not ext or not isinstance(ext, str):
+        return None
+    if ".gd" in ext:
+        if ext.startswith("res://"):
+            return ext
+        import posixpath
+        base = posixpath.dirname(from_path[6:])
+        return "res://" + posixpath.normpath(posixpath.join(base, ext))
+    return script_classes.get(ext.split(".")[-1])
 
+def _read_autoloads(data_map: dict) -> dict[str, str]:
+    src = data_map.get("res://project.godot")
+    if src is None:
+        return {}
+    text = src.decode("utf-8", "replace")
+    m = re.search(r"(?ms)^\[autoload\]\s*\n(.*?)(?=^\[|\Z)", text)
+    if not m:
+        return {}
+    out = {}
+    for line in m.group(1).splitlines():
+        am = re.match(r'\s*([A-Za-z_]\w*)\s*=\s*"\*?(res://[^"]+)"', line)
+        if am:
+            out[am.group(1)] = am.group(2)
+    return out
 
 KEY_HEADER_TEMPLATE = """// AUTO-GENERATED by gdprotect build — do not commit secrets downstream.
 // Per-build key shards for this protected container. Rebuild the 32-byte

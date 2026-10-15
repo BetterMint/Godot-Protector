@@ -12,19 +12,13 @@ _EXTENDS_RES = re.compile(
 _PRELOAD = re.compile(r'preload\("(?P<path>res://[^"]+\.gd)"\)')
 _LOAD = re.compile(r'(?<!pre)load\("(?P<path>res://[^"]+\.gd)"\)')
 
-
 def _attrs_dict(attr_text: str) -> dict:
     return dict(_ATTR.findall(attr_text))
-
 
 def _attrs_text(attrs: dict) -> str:
     return " ".join(f'{k}="{v}"' for k, v in attrs.items())
 
-
 def rewrite_scene(text: str, class_map: dict[str, str]) -> str:
-    """Rewrite .tscn/.tres text: ext_resource Script entries whose path is a
-    natively-compiled script are dropped, and the owning node's
-    `script = ExtResource(...)` becomes `type="ClassName"` on the node."""
     if not class_map:
         return text
     ext = {}
@@ -66,11 +60,7 @@ def rewrite_scene(text: str, class_map: dict[str, str]) -> str:
         lines.append(line)
     return "".join(lines)
 
-
 def rewrite_gd(text: str, class_map: dict[str, str]) -> str:
-    """Rewrite .gd source: `extends "res://x.gd"`, `preload("res://x.gd")` and
-    `load("res://x.gd")` pointing at natively-compiled scripts become the
-    registered class name."""
     if not class_map:
         return text
 

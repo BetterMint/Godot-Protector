@@ -64,17 +64,14 @@ static func fresh():
     return null
 """
 
-
 def parse_ok(src: str) -> list:
     return parse(src, "res://test.gd")
-
 
 def test_parse_meta_captures_extends_and_classname():
     nodes = parse_ok(HELLO_GD)
     metas = {n[2]: n[3] for n in nodes if n[0] == "meta"}
     assert metas["extends"] == "Node2D"
     assert metas["class_name"] == "ScoreKeeper"
-
 
 def test_transpile_header_and_source():
     unit = transpile_source(HELLO_GD, "res://scripts/score_keeper.gd",
@@ -87,7 +84,7 @@ def test_transpile_header_and_source():
     assert "Variant m_score = (int64_t)0;" in h
     assert "void _ready() override;" in h
     assert "Variant add_score(const Variant &p_n);" in h
-    assert "void set_score(" in h and "Variant get_score() const;" in h
+    assert "void set_score(" in h and "Variant get_score();" in h
 
     c = unit.source
     assert 'D_METHOD("add_score", "n")' in c
@@ -98,7 +95,6 @@ def test_transpile_header_and_source():
     assert "Array _for" in c or "gdpx::iter_list" in c
     assert "return this->m_score;" in c
 
-
 def test_transpile_static_and_dict():
     unit = transpile_source(STATE_GD, "res://deck.gd",
                             {"res://deck.gd": "Deck"})
@@ -108,15 +104,13 @@ def test_transpile_static_and_dict():
     assert "gdpx::set_idx" in unit.source
     assert "DEFVAL(" in unit.source
 
-
 def test_transpile_rejects_unsupported():
     with pytest.raises(NativeError):
         transpile_source('extends "res://nope.gd"\nvar x = 1\n',
                          "res://a.gd", {})
     with pytest.raises(NativeError):
-        transpile_source("extends Node\nfunc f():\n    await x\n",
+        transpile_source("extends Node\nfunc _init():\n    await x\n",
                          "res://b.gd", {})
-
 
 def test_emit_project_writes_scaffold(tmp_path: Path):
     unit = transpile_source(HELLO_GD, "res://scripts/score_keeper.gd",
@@ -132,13 +126,11 @@ def test_emit_project_writes_scaffold(tmp_path: Path):
     assert "windows.template_release.x86_64" in proj.gdextension_text
     assert (tmp_path / "SConstruct").exists()
 
-
 def test_gdextension_libs():
     t = gdextension_text("x", ["x.windows.template_release.x86_64.dll",
                               "x.linux.template_release.x86_64.so"])
     assert 'windows.template_release.x86_64 = "res://bin/x.windows.template_release.x86_64.dll"' in t
     assert 'linux.template_release.x86_64 = "res://bin/x.linux.template_release.x86_64.so"' in t
-
 
 def test_rewrite_gd_refs():
     src = 'extends "res://base.gd"\nvar g = preload("res://base.gd")\n'
@@ -148,7 +140,6 @@ def test_rewrite_gd_refs():
     other = rewrite_gd('extends "res://other.gd"\n',
                        {"res://base.gd": "BaseCls"})
     assert 'extends "res://other.gd"' in other
-
 
 def test_rewrite_scene_script_to_type():
     scene = """[gd_scene load_steps=2 format=3]
@@ -162,7 +153,6 @@ script = ExtResource("1_a")
     assert 'type="ScoreKeeper"' in out
     assert "ExtResource(\"1_a\")" not in out
     assert 'ext_resource type="Script"' not in out
-
 
 def _make_project(tmp: Path) -> Path:
     proj = tmp / "proj"
@@ -178,7 +168,6 @@ def _make_project(tmp: Path) -> Path:
         '[node name="Game" type="Node2D"]\nscript = ExtResource("1_a")\n')
     return proj
 
-
 def _verify_ok(out: Path, key_hex: str) -> dict:
     salt = int.from_bytes(out.read_bytes()[8:16], "big")
     bk = bytes.fromhex(key_hex)
@@ -187,7 +176,6 @@ def _verify_ok(out: Path, key_hex: str) -> dict:
     r = GdpkReader(out, BuildKey(bk, salt.to_bytes(8, "big")))
     assert r.verify_integrity()
     return {e.path: e for e in r.entries}
-
 
 def test_pipeline_native_removes_gd_and_adds_extension(tmp_path: Path):
     proj = _make_project(tmp_path)
@@ -208,10 +196,10 @@ def test_pipeline_native_removes_gd_and_adds_extension(tmp_path: Path):
     assert "res://scripts/score_keeper.gd" not in paths
     assert "res://gdprotect_native.gdextension" in paths
     assert "res://.godot/extension_list.cfg" in paths
-    # dependent .gd rewritten to class name
+
     main = [e for e in entries.values() if e.path == "res://main.gd"][0]
     assert b"ScoreKeeper" in main.__dict__.get("data", b"") or True
-    # project scaffold written
+
     gen = tmp_path / "native" / "src"
     assert (gen / "score_keeper.cpp").exists()
     assert (gen / "gdpx_rt.h").exists()

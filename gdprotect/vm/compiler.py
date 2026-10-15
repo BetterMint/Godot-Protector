@@ -335,7 +335,19 @@ class _Parser:
             if t.kind == "eof":
                 return nodes
             if self.at_op("@"):
-                self.skip_annotations()
+                anns = []
+                while self.at_op("@"):
+                    anns += self.read_annotations()
+                    while self.cur.kind == "nl" or self.at_op(";"):
+                        self.take()
+                t = self.cur
+                if t.kind == "eof":
+                    return nodes
+                if t.kind == "indent":
+                    self.unsup("unexpected indentation at top level", t)
+                if t.kind != "name":
+                    self.unsup(f"unexpected top-level token {t.val!r}", t)
+                nodes.append(self.parse_module_stmt(t) + (anns,))
                 continue
             if t.kind == "indent":
                 self.unsup("unexpected indentation at top level (get/set "
@@ -353,10 +365,10 @@ class _Parser:
             if self.at_kw("func"):
                 return self.parse_func(True)
             if self.at_kw("var"):
-                return self.parse_member()
+                return self.parse_member(True)
             self.unsup("'static' outside a function/var")
         if w == "var":
-            return self.parse_member()
+            return self.parse_member(False)
         if w == "const":
             return self.parse_const()
         if w == "signal":
@@ -384,11 +396,13 @@ class _Parser:
             self.unsup(f"top-level '{w}' is not virtualizable", t)
         self.unsup(f"unsupported top-level statement '{w}'", t)
 
-    def skip_annotations(self):
+    def read_annotations(self):
+
+        out = []
         while self.accept_op("@"):
-            self.expect_name()
+            n = self.expect_name()
             while self.accept_op("."):
-                self.expect_name()
+                n += "." + self.expect_name()
             if self.at_op("("):
                 d = 0
                 while True:
@@ -401,7 +415,11 @@ class _Parser:
                         d -= 1
                         if d == 0:
                             break
-            return
+            out.append(n)
+        return out
+
+    def skip_annotations(self):
+        self.read_annotations()
 
     def parse_signal(self):
         ln = self.take().line
@@ -430,7 +448,7 @@ class _Parser:
         e = self.parse_expr()
         return ("const", ln, name, e)
 
-    def parse_member(self):
+    def parse_member(self, static=False):
         t = self.take()
         name = self.expect_name()
         if self.accept_op(":") and not self.at_op("="):
@@ -446,12 +464,29 @@ class _Parser:
         if getattr(self, "native", False) and self.at_op(":"):
             self.take()
             sparam, setter, getter = self.parse_accessors()
+        elif getattr(self, "native", False) and self.at_kw("setget"):
+            self.take()
+            setter, getter = self.parse_setget_args(name)
         elif self.at_kw("setget") or self.at_kw("get") or self.at_kw("set"):
             self.unsup("property accessors (setget/get/set)")
-        return ("member", t.line, name, init, sparam, setter, getter)
+        return ("member", t.line, name, init, sparam, setter, getter,
+                static)
+
+    def parse_setget_args(self, name):
+
+        sn = gn = None
+        if self.cur.kind == "name" and self.cur.val != "_":
+            sn = self.take().val
+        if self.accept_op(","):
+            if self.cur.kind == "name" and self.cur.val != "_":
+                gn = self.take().val
+        setter = ("sg", sn or f"set_{name}")
+        getter = ("sg", gn or f"get_{name}") \
+            if (gn is not None or sn is None) else None
+        return setter, getter
 
     def parse_accessors(self):
-        # after the ':' — inline `set(v): ...; get: ...` or an indented block
+
         sparam, setter, getter = "value", None, None
         def one():
             nonlocal sparam, setter, getter
@@ -600,7 +635,7 @@ class _Parser:
             self.take()
         elif in_expr and (t.kind == "op" and t.val in (")", "]", "}", ",")
                           or t.kind in ("eof", "dedent")):
-            pass  # inline lambda body ends at the enclosing closer
+            pass
         elif t.kind in ("eof", "dedent"):
             pass
         elif self.at_kw("elif") or self.at_kw("else"):
@@ -717,10 +752,27 @@ class _Parser:
                 if self.at_kw("var"):
                     return self.parse_member()
                 self.unsup("'static' outside a function/var", t)
+            if getattr(self, "native", False) and w == "assert":
+                self.take()
+                if self.at_op("("):
+                    a = self.parse_call_args()
+                else:
+                    a = [self.parse_expr()]
+                    if self.accept_op(","):
+                        a.append(self.parse_expr())
+                if not (1 <= len(a) <= 2):
+                    self.err("assert takes 1-2 args", t)
+                return ("assert", t.line, a[0],
+                        a[1] if len(a) > 1 else None)
+            if getattr(self, "native", False) and w == "breakpoint":
+                self.take()
+                return ("pass", t.line)
             if w in ("match", "await", "yield", "assert", "breakpoint",
                      "enum", "class", "func", "signal", "extends",
                      "class_name", "setget", "static", "remote", "master",
-                     "puppet", "sync"):
+                     "puppet", "sync") and not (
+                    getattr(self, "native", False)
+                    and w in ("await", "yield", "match", "enum")):
                 self.unsup(f"'{w}' is not virtualizable", t)
         e = self.parse_expr()
         if e[0] == "name" and self.at_op(":="):
@@ -753,6 +805,10 @@ class _Parser:
             self.take()
             sparam, setter, getter = self.parse_accessors()
             return ("var", t.line, name, init, sparam, setter, getter)
+        if getattr(self, "native", False) and self.at_kw("setget"):
+            self.take()
+            setter, getter = self.parse_setget_args(name)
+            return ("var", t.line, name, init, "value", setter, getter)
         return ("var", t.line, name, init)
 
     def parse_if(self):
@@ -801,9 +857,9 @@ class _Parser:
         return e
 
     def _if_is_stmt(self):
-        # Inside a lambda-in-expression the indentation is gone, so a
-        # following 'if' can be a new statement rather than a ternary tail.
-        # It is a ternary iff a depth-0 'else' precedes ':' / a closer.
+
+
+
         d = 0
         i = self.i + 1
         while i < len(self.t):
@@ -825,8 +881,8 @@ class _Parser:
         return True
 
     def _stmtish_ahead(self):
-        # lookahead from cur: inside a paren-mode lambda, decide whether
-        # what follows is a statement (not an expression to return).
+
+
         t = self.cur
         if t.kind == "name" and t.val in ("if", "for", "while", "match",
                 "var", "const", "return", "pass", "break", "continue",
@@ -951,6 +1007,9 @@ class _Parser:
 
     def parse_unary(self):
         t = self.cur
+        if getattr(self, "native", False) and self.at_kw("await"):
+            ln = self.take().line
+            return ("await", ln, self.parse_unary())
         if t.kind == "op" and t.val in ("-", "+", "!", "~"):
             self.take()
             e = self.parse_unary()
@@ -1068,6 +1127,10 @@ class _Parser:
                 return ("self", t.line)
             if w == "func" and getattr(self, "native", False):
                 return self.parse_lambda(t.line)
+            if w == "super" and getattr(self, "native", False):
+                return ("super", t.line)
+            if w == "yield" and getattr(self, "native", False):
+                return self.parse_yield(t.line)
             if w in ("super", "func", "await", "yield", "match", "enum",
                      "class", "signal", "assert", "breakpoint"):
                 self.unsup(f"'{w}' is not virtualizable", t)
@@ -1077,6 +1140,25 @@ class _Parser:
                 self.err(f"unexpected keyword '{w}'", t)
             return ("name", t.line, w)
         self.err(f"unexpected token {t.val!r}", t)
+
+    def parse_yield(self, ln):
+
+
+        if not self.at_op("("):
+            return ("await", ln, ("attr", ln,
+                                  ("call", ln, ("name", ln, "get_tree"), []),
+                                  "process_frame"))
+        args = self.parse_call_args()
+        if not args:
+            return ("await", ln, ("attr", ln,
+                                  ("call", ln, ("name", ln, "get_tree"), []),
+                                  "process_frame"))
+        if len(args) == 1:
+            return ("await", ln, args[0])
+        if len(args) == 2 and args[1][0] == "lit" \
+                and isinstance(args[1][2], str):
+            return ("await", ln, ("attr", ln, args[0], args[1][2]))
+        self.unsup("yield with unsupported arguments", None)
 
     def parse_inner_class(self):
         ln = self.take().line
@@ -1096,7 +1178,16 @@ class _Parser:
                     if self.cur.kind in ("dedent", "eof"):
                         break
                     if self.at_op("@"):
-                        self.skip_annotations()
+                        anns = []
+                        while self.at_op("@"):
+                            anns += self.read_annotations()
+                            while self.cur.kind == "nl":
+                                self.take()
+                        t = self.cur
+                        if t.kind != "name":
+                            self.unsup(f"unexpected inner-class token {t.val!r}",
+                                       t)
+                        body.append(self.parse_module_stmt(t) + (anns,))
                         continue
                     t = self.cur
                     if t.kind != "name":

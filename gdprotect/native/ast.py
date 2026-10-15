@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from ..vm.compiler import CompileError, _Parser, _lex
 
-
 class NativeError(Exception):
     pass
-
 
 def parse(source: str, filename: str = "<script>") -> list[tuple]:
     try:

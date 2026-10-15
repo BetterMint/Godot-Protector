@@ -86,6 +86,55 @@ gdprotect scan mygame -v        # per-file listing
 gdprotect scan game.pck         # kind histogram for an export
 ```
 
+### 1.6 Native compilation (source destruction)
+
+For real source destruction — `.gd` files become machine code, like a
+compiled C++ project — enable `[native]`:
+
+```toml
+[native]
+enabled  = true
+auto     = true               # every script, or use scripts = [...]
+on_error = "fallback"         # untranspilable scripts stay interpreted
+godot_cpp = "D:/godot-cpp"    # checked-out godot-cpp (4.x branch)
+```
+
+The stage runs **first**, on pristine source: marked scripts transpile
+to godot-cpp C++ under `native.out_dir`, scons builds them into a
+GDExtension `.dll`/`.so`, the `.gd` files are **removed from the pack
+entirely**, scenes/dependents are rewritten to the native classes, and
+the `.gdextension` manifest + libraries are packed. Recovery from the
+shipped build means disassembling a dll — no key, no bytecode.
+
+How the target set is resolved:
+
+- `auto = true` starts from every `.gd`; `exclude` globs are subtracted
+  in both modes.
+- **Base scripts are pulled in transitively** — if a native script
+  extends another script (by `extends "res://base.gd"` or by global
+  `class_name`), the base is added automatically (a native class cannot
+  derive from an interpreted one).
+- **Autoloads** are read from `project.godot`'s `[autoload]` section so
+  singleton names resolve in generated code.
+- **`@tool` scripts stay interpreted** (`skip_tool`) — editor scripts
+  often touch editor-only APIs that don't exist in export templates.
+- `on_error = "fallback"` drops any script that fails to transpile
+  **plus anything that depends on it**, leaving those `.gd` in the pack
+  for the obfuscate/virtualize stages. `on_error = "abort"` (default)
+  stops the build on the first failure.
+
+Without a C++ toolchain the emit still produces a complete, buildable
+project at `native.out_dir` (`BUILD.md` inside explains the scons
+invocation); `require_build = false` lets the pack proceed without the
+dll for inspection. Supported surface: the full GDScript grammar used
+by real projects — members/`class_name`/signals/enums, property
+`set`/`get` blocks (and Godot-3 `setget`), `match`, `func` lambdas
+(including captures via `.bind`), `await`/`yield` (compiled to `GxCo`
+coroutine state machines — lambdas that await become coroutines too),
+`super()`, `assert`, `is`/`as`, inner classes, `static var`/`func`,
+`@export`/`@onready` and friends, autoload singletons, and cross-script
+references (`class_name`, `preload`, `is`/`as` against script classes).
+
 ---
 
 ## 2. CLI reference
@@ -163,6 +212,22 @@ preserve = [                    # identifiers that must NOT be renamed:
 enabled   = false               # requires the runtime interpreter!
 scripts   = ["res://src/net/**", "res://src/shop/**"]
 hardening = 1                   # opaque-predicate density, 0..3
+
+[native]
+enabled       = false           # GDScript -> C++ GDExtension transpile
+auto          = false           # transpile every .gd in the pack
+scripts       = []              # glob list (when auto = false)
+exclude       = []              # glob list removed from the native set
+on_error      = "abort"         # "abort" | "fallback" (keep interpreted)
+skip_tool     = true            # @tool editor scripts stay interpreted
+ext_name      = "gdprotect_native"
+out_dir       = "build/native"  # emitted C++ project lives here
+godot_cpp     = ""              # path to godot-cpp checkout (or $GODOT_CPP)
+platform      = "windows"
+target        = "template_release"
+arch          = "x86_64"
+build         = true            # run scons when a toolchain is present
+require_build = true            # abort if the dll can't be produced
 ```
 
 > **`chunk_size` warning.** `chunk_size` is stored in the encrypted table

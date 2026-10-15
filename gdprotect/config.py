@@ -26,6 +26,10 @@ class VirtualizeConfig:
 class NativeConfig:
     enabled: bool = False
     scripts: list[str] = field(default_factory=list)
+    auto: bool = False
+    exclude: list[str] = field(default_factory=list)
+    on_error: str = "abort"
+    skip_tool: bool = True
     ext_name: str = "gdprotect_native"
     out_dir: str = "build/native"
     godot_cpp: str = ""

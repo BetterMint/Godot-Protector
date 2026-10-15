@@ -28,9 +28,18 @@ def _cfg(args) -> Config:
     if getattr(args, "virtualize", None):
         cfg.virtualize.enabled = True
         cfg.virtualize.scripts = args.virtualize
-    if getattr(args, "native", None):
+    if getattr(args, "native", None) is not None:
         cfg.native.enabled = True
         cfg.native.scripts = args.native
+        if not args.native:
+            cfg.native.auto = True
+    if getattr(args, "native_auto", False):
+        cfg.native.enabled = True
+        cfg.native.auto = True
+    if getattr(args, "native_exclude", None):
+        cfg.native.exclude = args.native_exclude
+    if getattr(args, "native_fallback", False):
+        cfg.native.on_error = "fallback"
     if getattr(args, "no_native_build", False):
         cfg.native.require_build = False
         cfg.native.build = False
@@ -66,6 +75,11 @@ def cmd_build(args) -> int:
     if nat.get("compiled"):
         print(f"  native-compiled scripts: {nat['compiled']} "
               f"-> {nat.get('project')}")
+        fb = nat.get("fallback") or {}
+        if fb:
+            print(f"  native fallback (stay interpreted): {len(fb)}")
+            for p, why in sorted(fb.items()):
+                print(f"    {p}: {why}")
         for a in nat.get("artifacts", []):
             print(f"    artifact: {a}")
     if args.emit_key:
@@ -147,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--native", nargs="*", metavar="GLOB",
                    help="transpile these .gd scripts to a GDExtension "
                         "(C++ -> dll); the .gd source is removed")
+    p.add_argument("--native-auto", action="store_true",
+                   help="transpile every .gd in the project")
+    p.add_argument("--native-exclude", nargs="*", metavar="GLOB",
+                   help="globs to keep out of the native set")
+    p.add_argument("--native-fallback", action="store_true",
+                   help="scripts that fail to transpile stay interpreted "
+                        "instead of aborting the build")
     p.add_argument("--no-native-build", action="store_true",
                    help="emit the C++ project but don't require a built dll")
     p.add_argument("--native-out", metavar="DIR",

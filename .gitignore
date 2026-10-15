@@ -37,3 +37,5 @@ secret*
 build/
 out/
 dist/
+
+_smoke.py
