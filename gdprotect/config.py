@@ -23,6 +23,19 @@ class VirtualizeConfig:
     stringpool: bool = False
 
 @dataclass
+class NativeConfig:
+    enabled: bool = False
+    scripts: list[str] = field(default_factory=list)
+    ext_name: str = "gdprotect_native"
+    out_dir: str = "build/native"
+    godot_cpp: str = ""
+    platform: str = "windows"
+    target: str = "template_release"
+    arch: str = "x86_64"
+    build: bool = True
+    require_build: bool = True
+
+@dataclass
 class PackConfig:
     input: str = "."
     output: str = "build/game.gdpk"
@@ -35,6 +48,7 @@ class Config:
     pack: PackConfig = field(default_factory=PackConfig)
     obfuscate: ObfuscateConfig = field(default_factory=ObfuscateConfig)
     virtualize: VirtualizeConfig = field(default_factory=VirtualizeConfig)
+    native: NativeConfig = field(default_factory=NativeConfig)
     seed: int | None = None
 
     @staticmethod
@@ -44,7 +58,8 @@ class Config:
         data = tomllib.loads(raw.decode()) if p.suffix == ".toml" else json.loads(raw)
         cfg = Config()
         for section, cls in (("pack", PackConfig), ("obfuscate", ObfuscateConfig),
-                             ("virtualize", VirtualizeConfig)):
+                             ("virtualize", VirtualizeConfig),
+                             ("native", NativeConfig)):
             if section in data:
                 setattr(cfg, section, cls(**data[section]))
         cfg.seed = data.get("seed")

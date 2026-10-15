@@ -342,35 +342,47 @@ class _Parser:
                            "blocks and inner classes are unsupported)", t)
             if t.kind != "name":
                 self.unsup(f"unexpected top-level token {t.val!r}", t)
-            w = t.val
-            if w == "func":
-                nodes.append(self.parse_func(False))
-            elif w == "static":
+            nodes.append(self.parse_module_stmt(t))
+
+    def parse_module_stmt(self, t):
+        w = t.val
+        if w == "func":
+            return self.parse_func(False)
+        if w == "static":
+            self.take()
+            if self.at_kw("func"):
+                return self.parse_func(True)
+            if self.at_kw("var"):
+                return self.parse_member()
+            self.unsup("'static' outside a function/var")
+        if w == "var":
+            return self.parse_member()
+        if w == "const":
+            return self.parse_const()
+        if w == "signal":
+            return self.parse_signal()
+        if w in ("extends", "class_name", "tool"):
+            ln = self.take().line
+            arg = None
+            if self.cur.kind == "str":
+                arg = self.take().val
+            elif self.cur.kind == "name":
+                arg = self.take().val
+                while self.accept_op("."):
+                    arg += "." + self.expect_name()
+            while self.cur.kind not in ("nl", "eof"):
                 self.take()
-                if self.at_kw("func"):
-                    nodes.append(self.parse_func(True))
-                elif self.at_kw("var"):
-                    nodes.append(self.parse_member())
-                else:
-                    self.unsup("'static' outside a function/var")
-            elif w == "var":
-                nodes.append(self.parse_member())
-            elif w == "const":
-                nodes.append(self.parse_const())
-            elif w == "signal":
-                nodes.append(self.parse_signal())
-            elif w in ("extends", "class_name", "tool"):
-                ln = self.take().line
-                while self.cur.kind not in ("nl", "eof"):
-                    self.take()
-                nodes.append(("meta", ln, w))
-            elif w in ("enum", "class", "match", "await", "yield", "assert",
-                       "setget", "export", "onready", "remote", "master",
-                       "puppet", "sync", "remotesync", "mastersync",
-                       "puppetsync", "breakpoint", "namespace"):
-                self.unsup(f"top-level '{w}' is not virtualizable", t)
-            else:
-                self.unsup(f"unsupported top-level statement '{w}'", t)
+            return ("meta", ln, w, arg)
+        if w == "enum" and getattr(self, "native", False):
+            return self.parse_enum()
+        if w == "class" and getattr(self, "native", False):
+            return self.parse_inner_class()
+        if w in ("enum", "class", "match", "await", "yield", "assert",
+                 "setget", "export", "onready", "remote", "master",
+                 "puppet", "sync", "remotesync", "mastersync",
+                 "puppetsync", "breakpoint", "namespace"):
+            self.unsup(f"top-level '{w}' is not virtualizable", t)
+        self.unsup(f"unsupported top-level statement '{w}'", t)
 
     def skip_annotations(self):
         while self.accept_op("@"):
@@ -399,7 +411,7 @@ class _Parser:
             if not self.accept_op(")"):
                 while True:
                     params.append(self.expect_name())
-                    if self.accept_op(":"):
+                    if self.accept_op(":") and not self.at_op("="):
                         self.skip_type()
                     if not self.accept_op(","):
                         break
@@ -411,7 +423,7 @@ class _Parser:
     def parse_const(self):
         ln = self.take().line
         name = self.expect_name()
-        if self.accept_op(":"):
+        if self.accept_op(":") and not self.at_op("="):
             self.skip_type()
         if not self.accept_op("=") and not self.accept_op(":="):
             self.err("expected '=' in const declaration")
@@ -421,8 +433,8 @@ class _Parser:
     def parse_member(self):
         t = self.take()
         name = self.expect_name()
-        if self.accept_op(":"):
-            if self.cur.kind == "nl":
+        if self.accept_op(":") and not self.at_op("="):
+            if self.cur.kind == "nl" and not getattr(self, "native", False):
                 self.unsup("property get/set blocks", t)
             if self.at_kw("get") or self.at_kw("set") or self.at_kw("setget"):
                 self.unsup("property accessors (setget/get/set)", t)
@@ -430,9 +442,101 @@ class _Parser:
         init = None
         if self.accept_op("=") or self.accept_op(":="):
             init = self.parse_expr()
-        if self.at_kw("setget") or self.at_kw("get") or self.at_kw("set"):
+        sparam, setter, getter = "value", None, None
+        if getattr(self, "native", False) and self.at_op(":"):
+            self.take()
+            sparam, setter, getter = self.parse_accessors()
+        elif self.at_kw("setget") or self.at_kw("get") or self.at_kw("set"):
             self.unsup("property accessors (setget/get/set)")
-        return ("member", t.line, name, init)
+        return ("member", t.line, name, init, sparam, setter, getter)
+
+    def parse_accessors(self):
+        # after the ':' — inline `set(v): ...; get: ...` or an indented block
+        sparam, setter, getter = "value", None, None
+        def one():
+            nonlocal sparam, setter, getter
+            if self.at_kw("set"):
+                self.take()
+                if self.accept_op("("):
+                    if not self.at_op(")"):
+                        sparam = self.expect_name()
+                        if self.accept_op(":") and not self.at_op("="):
+                            self.skip_type()
+                    self.expect_op(")")
+                setter = self.parse_suite()
+                return True
+            if self.at_kw("get"):
+                self.take()
+                getter = self.parse_suite()
+                return True
+            return False
+        if self.cur.kind == "nl":
+            self.take()
+            if self.cur.kind == "indent":
+                self.take()
+                while True:
+                    while self.cur.kind == "nl":
+                        self.take()
+                    if not one():
+                        break
+                while self.cur.kind == "nl":
+                    self.take()
+                if self.cur.kind == "dedent":
+                    self.take()
+        else:
+            while one():
+                if not self.accept_op(";"):
+                    break
+        return sparam, setter, getter
+
+    def parse_enum(self):
+        ln = self.take().line
+        name = None
+        if self.cur.kind == "name":
+            name = self.take().val
+        self.expect_op("{")
+        items = []
+        while not self.at_op("}"):
+            n = self.expect_name()
+            e = None
+            if self.accept_op("="):
+                e = self.parse_expr()
+            items.append((n, e))
+            self.accept_op(",")
+        self.expect_op("}")
+        return ("enum", ln, name, items)
+
+    def parse_match(self):
+        ln = self.take().line
+        subj = self.parse_expr()
+        self.expect_op(":")
+        if self.cur.kind == "nl":
+            self.take()
+        if self.cur.kind == "indent":
+            self.take()
+        arms = []
+        while self.cur.kind not in ("dedent", "eof"):
+            pats = []
+            while True:
+                if self.cur.kind == "name" and self.cur.val == "_":
+                    self.take()
+                    pats.append(("wild", ln))
+                elif self.at_kw("var"):
+                    self.unsup("binding patterns in match", self.cur)
+                else:
+                    pats.append(self.parse_expr())
+                if not self.accept_op(","):
+                    break
+            guard = None
+            if self.at_kw("when"):
+                self.take()
+                guard = self.parse_expr()
+            arms.append((pats, guard, self.parse_suite()))
+            while self.cur.kind == "nl":
+                self.take()
+        if self.cur.kind == "dedent":
+            self.take()
+        return ("match", ln, subj, arms)
 
     def parse_func(self, static):
         ln = self.take().line
@@ -444,7 +548,7 @@ class _Parser:
                 if self.at_op(")"):
                     break
                 pname = self.expect_name()
-                if self.accept_op(":"):
+                if self.accept_op(":") and not self.at_op("="):
                     self.skip_type()
                 dflt = None
                 if self.accept_op("="):
@@ -477,7 +581,8 @@ class _Parser:
                     if d == 0:
                         return
 
-    def parse_suite(self):
+    def parse_suite(self, in_expr=False):
+        in_expr = in_expr or getattr(self, "expr_depth", 0) > 0
         ln = self.expect_op(":").line
         if self.cur.kind == "nl":
             self.take()
@@ -487,12 +592,15 @@ class _Parser:
             return []
         if self.cur.kind == "eof":
             self.err("expected a suite after ':'")
-        out = self.parse_inline()
+        out = self.parse_inline(in_expr)
         if out and out[-1][0] in ("if", "while", "for"):
             return out
         t = self.cur
         if t.kind == "nl":
             self.take()
+        elif in_expr and (t.kind == "op" and t.val in (")", "]", "}", ",")
+                          or t.kind in ("eof", "dedent")):
+            pass  # inline lambda body ends at the enclosing closer
         elif t.kind in ("eof", "dedent"):
             pass
         elif self.at_kw("elif") or self.at_kw("else"):
@@ -501,14 +609,24 @@ class _Parser:
             self.err(f"expected end of line, got {t.val!r}", t)
         return out
 
-    def parse_inline(self):
+    def parse_inline(self, in_expr=False):
+        in_expr = in_expr or getattr(self, "expr_depth", 0) > 0
         out = []
         while True:
             out.append(self.parse_stmt())
             if self.accept_op(";"):
                 t = self.cur
+                if in_expr and t.kind == "op" and t.val in (")", "]", "}", ","):
+                    break
                 if t.kind in ("nl", "eof") or self.at_kw("elif") \
                         or self.at_kw("else"):
+                    break
+                continue
+            if in_expr:
+                t = self.cur
+                if t.kind == "op" and t.val in (")", "]", "}", ",") \
+                        or t.kind in ("nl", "eof", "dedent") \
+                        or self.at_kw("elif") or self.at_kw("else"):
                     break
                 continue
             break
@@ -532,16 +650,29 @@ class _Parser:
                     break
                 s = self.parse_stmt()
                 out.append(s)
-            if s[0] not in ("if", "while", "for"):
+            if s[0] not in ("if", "while", "for", "match"):
                 t = self.cur
                 if t.kind not in ("nl", "dedent", "eof") \
-                        and not self.at_kw("elif") and not self.at_kw("else"):
+                        and not self.at_kw("elif") and not self.at_kw("else") \
+                        and not (s[0] in ("var", "lconst")
+                                 and isinstance(s[3], tuple)
+                                 and s[3][0] == "lambda") \
+                        and not (s[0] == "assign"
+                                 and isinstance(s[4], tuple)
+                                 and s[4][0] == "lambda") \
+                        and not (s[0] == "return"
+                                 and isinstance(s[2], tuple)
+                                 and s[2][0] == "lambda"):
                     self.err(f"expected end of statement, got {t.val!r}", t)
 
     def parse_stmt(self):
         t = self.cur
         if t.kind == "op" and t.val == "@":
             self.skip_annotations()
+            while self.cur.kind == "nl":
+                self.take()
+            if self.cur.kind in ("dedent", "eof"):
+                return ("pass", t.line)
             return self.parse_stmt()
         if t.kind == "name":
             w = t.val
@@ -556,6 +687,8 @@ class _Parser:
                 if self.cur.kind in ("nl", "dedent", "eof") \
                         or self.at_op(";"):
                     return ("return", ln, None)
+                if getattr(self, "expr_depth", 0) and self._stmtish_ahead():
+                    return ("return", ln, None)
                 return ("return", ln, self.parse_expr())
             if w in ("pass", "break", "continue"):
                 return (self.take().val, t.line)
@@ -564,13 +697,26 @@ class _Parser:
             if w == "const":
                 ln = self.take().line
                 name = self.expect_name()
-                if self.accept_op(":"):
+                if self.accept_op(":") and not self.at_op("="):
                     self.skip_type()
                 if not self.accept_op("=") and not self.accept_op(":="):
                     self.err("expected '=' in const declaration")
                 return ("lconst", ln, name, self.parse_expr())
             if w in ("elif", "else"):
                 self.err(f"'{w}' without matching 'if'", t)
+            if w == "match" and getattr(self, "native", False):
+                return self.parse_match()
+            if w == "enum" and getattr(self, "native", False):
+                return self.parse_enum()
+            if w == "signal" and getattr(self, "native", False):
+                return self.parse_signal()
+            if w == "static" and getattr(self, "native", False):
+                self.take()
+                if self.at_kw("func"):
+                    return self.parse_func(True)
+                if self.at_kw("var"):
+                    return self.parse_member()
+                self.unsup("'static' outside a function/var", t)
             if w in ("match", "await", "yield", "assert", "breakpoint",
                      "enum", "class", "func", "signal", "extends",
                      "class_name", "setget", "static", "remote", "master",
@@ -581,6 +727,8 @@ class _Parser:
             ln = self.take().line
             return ("var", ln, e[2], self.parse_expr())
         if self.at_op(","):
+            if getattr(self, "expr_depth", 0):
+                return ("expr", t.line, e)
             self.unsup("tuple assignment / destructuring", t)
         if self.cur.kind == "op" and self.cur.val in _ASSIGN_OPS:
             op = self.take().val
@@ -592,8 +740,8 @@ class _Parser:
     def parse_local_var(self):
         t = self.take()
         name = self.expect_name()
-        if self.accept_op(":"):
-            if self.cur.kind == "nl":
+        if self.accept_op(":") and not self.at_op("="):
+            if self.cur.kind == "nl" and not getattr(self, "native", False):
                 self.unsup("property get/set blocks", t)
             if self.at_kw("get") or self.at_kw("set") or self.at_kw("setget"):
                 self.unsup("property accessors (setget/get/set)", t)
@@ -601,6 +749,10 @@ class _Parser:
         init = None
         if self.accept_op("=") or self.accept_op(":="):
             init = self.parse_expr()
+        if getattr(self, "native", False) and self.at_op(":"):
+            self.take()
+            sparam, setter, getter = self.parse_accessors()
+            return ("var", t.line, name, init, sparam, setter, getter)
         return ("var", t.line, name, init)
 
     def parse_if(self):
@@ -623,6 +775,9 @@ class _Parser:
     def parse_for(self):
         ln = self.take().line
         var = self.expect_name()
+        if getattr(self, "native", False) \
+                and self.accept_op(":") and not self.at_op("="):
+            self.skip_type()
         if self.at_op(","):
             self.unsup("multi-target for loops")
         if not self.accept_kw("in"):
@@ -636,12 +791,66 @@ class _Parser:
     def parse_tern(self):
         e = self.parse_or()
         if self.at_kw("if"):
+            if getattr(self, "expr_depth", 0) and self._if_is_stmt():
+                return e
             ln = self.take().line
             c = self.parse_or()
             if not self.accept_kw("else"):
                 self.err("expected 'else' in ternary expression")
             return ("tern", ln, c, e, self.parse_tern())
         return e
+
+    def _if_is_stmt(self):
+        # Inside a lambda-in-expression the indentation is gone, so a
+        # following 'if' can be a new statement rather than a ternary tail.
+        # It is a ternary iff a depth-0 'else' precedes ':' / a closer.
+        d = 0
+        i = self.i + 1
+        while i < len(self.t):
+            t = self.t[i]
+            if t.kind == "op":
+                if t.val in ("(", "[", "{"):
+                    d += 1
+                elif t.val in (")", "]", "}"):
+                    if d == 0:
+                        return True
+                    d -= 1
+                elif t.val in (":", ",") and d == 0:
+                    return True
+            elif t.kind == "name" and t.val == "else" and d == 0:
+                return False
+            elif t.kind in ("eof", "dedent"):
+                return True
+            i += 1
+        return True
+
+    def _stmtish_ahead(self):
+        # lookahead from cur: inside a paren-mode lambda, decide whether
+        # what follows is a statement (not an expression to return).
+        t = self.cur
+        if t.kind == "name" and t.val in ("if", "for", "while", "match",
+                "var", "const", "return", "pass", "break", "continue",
+                "elif", "else", "enum"):
+            return True
+        d = 0
+        i = self.i
+        while i < len(self.t):
+            t = self.t[i]
+            if t.kind == "op":
+                if t.val in ("(", "[", "{"):
+                    d += 1
+                elif t.val in (")", "]", "}"):
+                    if d == 0:
+                        return False
+                    d -= 1
+                elif d == 0 and t.val in _ASSIGN_OPS:
+                    return True
+                elif d == 0 and t.val in (",", ";", ":"):
+                    return False
+            elif t.kind in ("nl", "dedent", "eof"):
+                return False
+            i += 1
+        return False
 
     def parse_or(self):
         e = self.parse_and()
@@ -686,7 +895,15 @@ class _Parser:
                 self.take()
                 e = ("bin", t.line, "notin", e, self.parse_bitor())
             elif self.at_kw("is") or self.at_kw("as"):
-                self.unsup(f"'{t.val}' operator", t)
+                if getattr(self, "native", False):
+                    op = self.take().val
+                    tn = self.expect_name()
+                    while self.accept_op("."):
+                        tn += "." + self.expect_name()
+                    e = ("istype" if op == "is" else "astype",
+                         t.line, e, tn)
+                else:
+                    self.unsup(f"'{t.val}' operator", t)
             else:
                 return e
 
@@ -849,6 +1066,8 @@ class _Parser:
                 return ("lit", t.line, None)
             if w == "self":
                 return ("self", t.line)
+            if w == "func" and getattr(self, "native", False):
+                return self.parse_lambda(t.line)
             if w in ("super", "func", "await", "yield", "match", "enum",
                      "class", "signal", "assert", "breakpoint"):
                 self.unsup(f"'{w}' is not virtualizable", t)
@@ -858,6 +1077,60 @@ class _Parser:
                 self.err(f"unexpected keyword '{w}'", t)
             return ("name", t.line, w)
         self.err(f"unexpected token {t.val!r}", t)
+
+    def parse_inner_class(self):
+        ln = self.take().line
+        name = self.expect_name()
+        base = None
+        if self.accept_kw("extends"):
+            base = self.parse_expr()
+        self.expect_op(":")
+        body = []
+        if self.cur.kind == "nl":
+            self.take()
+            if self.cur.kind == "indent":
+                self.take()
+                while self.cur.kind not in ("dedent", "eof"):
+                    while self.cur.kind == "nl":
+                        self.take()
+                    if self.cur.kind in ("dedent", "eof"):
+                        break
+                    if self.at_op("@"):
+                        self.skip_annotations()
+                        continue
+                    t = self.cur
+                    if t.kind != "name":
+                        self.unsup(f"unexpected inner-class token {t.val!r}", t)
+                    body.append(self.parse_module_stmt(t))
+                if self.cur.kind == "dedent":
+                    self.take()
+        else:
+            body.append(self.parse_module_stmt(self.cur))
+        return ("innerclass", ln, name, base, body)
+
+    def parse_lambda(self, ln):
+        self.expect_op("(")
+        params = []
+        if not self.accept_op(")"):
+            while True:
+                pname = self.expect_name()
+                if self.accept_op(":") and not self.at_op("="):
+                    self.skip_type()
+                dflt = None
+                if self.accept_op("="):
+                    dflt = self.parse_expr()
+                params.append((pname, dflt))
+                if not self.accept_op(","):
+                    break
+            self.expect_op(")")
+        if self.accept_op("->"):
+            self.skip_type()
+        self.expr_depth = getattr(self, "expr_depth", 0) + 1
+        try:
+            body = self.parse_suite(in_expr=True)
+        finally:
+            self.expr_depth -= 1
+        return ("lambda", ln, params, body)
 
     def parse_node_path(self):
         if self.cur.kind == "str":

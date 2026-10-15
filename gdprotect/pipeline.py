@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +47,10 @@ def run_build(cfg: Config, emit_key: str | Path | None = None,
     else:
         r = PckReader(src)
         files = [(f.path, r.read_file(f)) for f in r.files]
+
+    native_stats: dict = {"compiled": 0, "artifacts": []}
+    if cfg.native.enabled and cfg.native.scripts:
+        files, native_stats = _native_stage(files, cfg, verbose)
 
     strpool_contents: dict[str, set[str]] = {}
     if cfg.virtualize.stringpool:
@@ -126,10 +131,156 @@ def run_build(cfg: Config, emit_key: str | Path | None = None,
         "virtualized": len(vm_paths),
         "stringpooled": len(strpool_contents),
         "obfuscated": cfg.obfuscate.enabled,
+        "native": native_stats,
         "build_key": key_hex,
         "key_shard": shard_info,
     })
     return stats
+
+
+def _native_stage(files, cfg: Config, verbose: bool):
+    """Transpile marked .gd scripts to C++ (GDExtension), remove them from
+    the pack, and add the extension manifest + libraries + rewritten
+    dependents."""
+    from .native import (NativeError, transpile_source, emit_project,
+                         rewrite_scene, rewrite_gd, build_extension,
+                         find_toolchain)
+
+    targets = {p for p, _ in files if p.endswith(".gd")
+               and matches_any(p, cfg.native.scripts)}
+    if not targets:
+        return files, {"compiled": 0, "artifacts": []}
+
+    # ---- pass 1: resolve class names so cross-references work ----
+    from .native.ast import parse as native_parse
+    class_map: dict[str, str] = {}
+    bases: dict[str, str] = {}
+    parsed: dict[str, list] = {}
+    # every class_name in the pack -> its script path (native or not), so
+    # native code can reference non-native global classes via Script call
+    script_classes: dict[str, str] = {}
+    for path, data in files:
+        if not path.endswith(".gd") or path in targets:
+            continue
+        m = re.search(r"(?m)^[ \t]*class_name[ \t]+([A-Za-z_]\w*)",
+                      data.decode("utf-8", "replace"))
+        if m:
+            script_classes[m.group(1)] = path
+    for path in sorted(targets):
+        data = dict(files)[path]
+        nodes = native_parse(data.decode("utf-8"), path)
+        parsed[path] = nodes
+        extends = next((n[3] for n in nodes
+                        if n[0] == "meta" and n[2] == "extends" and n[3]),
+                       None)
+        cname = next((n[3] for n in nodes
+                      if n[0] == "meta" and n[2] == "class_name" and n[3]),
+                     None)
+        bases[path] = extends
+        if cname:
+            class_map[path] = cname.split(".")[-1]
+    # synthesize names for scripts without class_name
+    for path in sorted(targets):
+        if path not in class_map:
+            stem = Path(path).stem
+            name = "Gx" + "".join(
+                p[:1].upper() + p[1:] for p in stem.replace("-", "_").split("_")
+                if p)
+            while name in set(class_map.values()):
+                name += "X"
+            class_map[path] = name
+    # native-to-native extends: base must be in the set or an engine class
+    for path, base in bases.items():
+        if base and base.startswith("res://") and base not in class_map:
+            raise ProtectionError(
+                f"native: {path} extends non-native {base} — add it to "
+                "native.scripts or drop it from the native set")
+
+    # ---- pass 2: transpile ----
+    units = []
+    for path in sorted(targets):
+        try:
+            unit = transpile_source(
+                dict(files)[path].decode("utf-8"), path, class_map,
+                script_classes)
+        except NativeError as e:
+            raise ProtectionError(f"native: {e}") from e
+        units.append(unit)
+        if verbose:
+            print(f"  + native {path} -> class {unit.class_name} "
+                  f"({unit.file_stem}.cpp)")
+
+    out_dir = Path(cfg.native.out_dir)
+    artifacts: list[Path] = []
+    if cfg.native.build:
+        proj = emit_project(units, out_dir, ext_name=cfg.native.ext_name,
+                            lib_names=[], compat="4.1")
+        res = build_extension(out_dir, platform=cfg.native.platform,
+                              target=cfg.native.target,
+                              arch=cfg.native.arch,
+                              godot_cpp=cfg.native.godot_cpp or None)
+        if res.built:
+            artifacts = res.artifacts
+            if verbose:
+                for a in artifacts:
+                    print(f"  + native artifact {a.name}")
+        else:
+            msg = (f"native build skipped: {res.reason}; emit buildable "
+                   f"project at {out_dir} (build with scons + godot-cpp, "
+                   f"then re-pack so the dll ships)")
+            if cfg.native.require_build:
+                raise ProtectionError(msg)
+            if verbose:
+                print(f"  ! {msg}")
+    else:
+        proj = emit_project(units, out_dir, ext_name=cfg.native.ext_name)
+
+    from .native.emit import gdextension_text
+    lib_names = [a.name for a in artifacts]
+    gtext = gdextension_text(cfg.native.ext_name, lib_names)
+
+    # ---- rewrite dependents & drop the sources ----
+    out = []
+    for res_path, data in files:
+        if res_path in targets:
+            continue
+        low = res_path.lower()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            out.append((res_path, data))
+            continue
+        if low.endswith(".gd"):
+            new = rewrite_gd(text, class_map)
+            if new != text and verbose:
+                print(f"  ~ rewrote references in {res_path}")
+            out.append((res_path, new.encode("utf-8")))
+        elif low.endswith((".tscn", ".tres", ".scn", ".res", ".theme")):
+            new = rewrite_scene(text, class_map)
+            if new != text and verbose:
+                print(f"  ~ rewrote scene refs in {res_path}")
+            out.append((res_path, new.encode("utf-8")))
+        elif res_path == "res://.godot/extension_list.cfg":
+            lines = [l for l in text.splitlines() if l.strip()]
+            new_ext = f"res://{cfg.native.ext_name}.gdextension"
+            if new_ext not in lines:
+                lines.append(new_ext)
+            out.append((res_path, ("\n".join(lines) + "\n").encode()))
+        else:
+            out.append((res_path, data))
+    if not any(p == "res://.godot/extension_list.cfg" for p, _ in out):
+        out.append(("res://.godot/extension_list.cfg",
+                    (f"res://{cfg.native.ext_name}.gdextension\n").encode()))
+    out.append((f"res://{cfg.native.ext_name}.gdextension", gtext.encode()))
+    for a in artifacts:
+        out.append((f"res://bin/{a.name}", a.read_bytes()))
+
+    return out, {"compiled": len(units),
+                 "artifacts": [a.name for a in artifacts],
+                 "classes": {u.res_path: u.class_name for u in units},
+                 "project": str(out_dir)}
+
+
 
 KEY_HEADER_TEMPLATE = """// AUTO-GENERATED by gdprotect build — do not commit secrets downstream.
 // Per-build key shards for this protected container. Rebuild the 32-byte

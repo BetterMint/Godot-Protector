@@ -28,6 +28,18 @@ def _cfg(args) -> Config:
     if getattr(args, "virtualize", None):
         cfg.virtualize.enabled = True
         cfg.virtualize.scripts = args.virtualize
+    if getattr(args, "native", None):
+        cfg.native.enabled = True
+        cfg.native.scripts = args.native
+    if getattr(args, "no_native_build", False):
+        cfg.native.require_build = False
+        cfg.native.build = False
+    if getattr(args, "native_out", None):
+        cfg.native.out_dir = args.native_out
+    if getattr(args, "godot_cpp", None):
+        cfg.native.godot_cpp = args.godot_cpp
+    if getattr(args, "native_platform", None):
+        cfg.native.platform = args.native_platform
     return cfg
 
 def cmd_scan(args) -> int:
@@ -50,6 +62,12 @@ def cmd_build(args) -> int:
           f"({stats['bytes_in']} -> {stats['bytes_out']} bytes, "
           f"{stats['chunks']} chunks)")
     print(f"  virtualized scripts: {stats['virtualized']}")
+    nat = stats.get("native") or {}
+    if nat.get("compiled"):
+        print(f"  native-compiled scripts: {nat['compiled']} "
+              f"-> {nat.get('project')}")
+        for a in nat.get("artifacts", []):
+            print(f"    artifact: {a}")
     if args.emit_key:
         print(f"  key shard header: {stats['key_shard']}")
     print(f"  build key (keep secret): {stats['build_key']}")
@@ -126,6 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-compress", action="store_true")
     p.add_argument("--virtualize", nargs="*", metavar="GLOB",
                    help="enable VM + res:// globs of scripts to virtualize")
+    p.add_argument("--native", nargs="*", metavar="GLOB",
+                   help="transpile these .gd scripts to a GDExtension "
+                        "(C++ -> dll); the .gd source is removed")
+    p.add_argument("--no-native-build", action="store_true",
+                   help="emit the C++ project but don't require a built dll")
+    p.add_argument("--native-out", metavar="DIR",
+                   help="where the generated C++ project is written "
+                        "(default build/native)")
+    p.add_argument("--godot-cpp", metavar="DIR", help="godot-cpp checkout")
+    p.add_argument("--native-platform", metavar="PLAT",
+                   help="scons platform (default windows)")
     p.add_argument("--report", help="write a JSON build report")
     p.add_argument("--patch", metavar="EXE",
                    help="embed this build's key into a Windows .exe overlay")
