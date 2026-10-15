@@ -49,7 +49,7 @@ class PckReader:
         magic, fmt = struct.unpack_from("<II", d, base)
         if magic != PCK_MAGIC:
             raise ValueError("bad pck magic")
-        if fmt not in (2, 3, 4):
+        if fmt < 2:
             raise ValueError(f"unsupported pck format v{fmt}")
         self.version = fmt
         flags, file_base = struct.unpack_from("<IQ", d, base + 20)
